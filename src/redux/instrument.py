@@ -1,6 +1,14 @@
 import __builtin__
 from ast import *
 
+disallowed_builtins = {
+    'compile', 'eval', 'execfile', 'file', 'id', 'input', 'open', 'raw_input',
+}
+
+disallowed_modules = {
+    'sys', 'os', '__builtin__' # lots more to come -- probably just need to white list these
+}
+
 class InstrumentTransformer(NodeTransformer):
     def __init__(self):
         self.expr_count = 0
@@ -55,7 +63,7 @@ def instrument(*args, **kwargs):
         src = open(filename).read()
         tree = parse(src, filename)
         tree = InstrumentTransformer().visit(tree)
-        code = compile(tree, filename, 'exec')
+        code = compile(tree, filename, 'exec', flags, dont_inherit)
         return code
 
     __builtin__.compile = compile_and_instrument
@@ -66,18 +74,14 @@ def instrument(*args, **kwargs):
 
 def run_in_safe_context(filename):
     def safe_import(name, *args):
-        print 'importing...', name
         mod = name.split('.')
-        if mod[0] == 'sys':
-            raise Exception('Cannot import sys!')
+        if mod[0] in disallowed_modules:
+            raise Exception('Cannot import module %s' % name)
         return __builtin__.__import__(name, *args)
 
-    builtins = {
-        'enumerate': __builtin__.enumerate,
-        '__import__': safe_import,
-    }
-
-    execfile(filename, {'__builtins__': builtins})
+    allowed_builtins = disallowed_builtins.intersection(set(dir(__builtins__)))
+    builtins = dict((k, getattr(__builtin__, k)) for k in allowed_builtins)
+    builtins['__import__'] = safe_import
 
 if __name__ == '__main__':
     from optparse import OptionParser
