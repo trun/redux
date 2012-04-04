@@ -1,14 +1,6 @@
 import __builtin__
 from ast import *
 
-disallowed_builtins = {
-    'compile', 'eval', 'execfile', 'file', 'id', 'input', 'open', 'raw_input',
-}
-
-disallowed_modules = {
-    'sys', 'os', '__builtin__' # lots more to come -- probably just need to white list these
-}
-
 class InstrumentTransformer(NodeTransformer):
     def __init__(self):
         self.expr_count = 0
@@ -71,17 +63,6 @@ def instrument(*args, **kwargs):
     import compileall
     for path in args:
         compileall.compile_file(path, force=True)
-
-def run_in_safe_context(filename):
-    def safe_import(name, *args):
-        mod = name.split('.')
-        if mod[0] in disallowed_modules:
-            raise Exception('Cannot import module %s' % name)
-        return __builtin__.__import__(name, *args)
-
-    allowed_builtins = disallowed_builtins.intersection(set(dir(__builtins__)))
-    builtins = dict((k, getattr(__builtin__, k)) for k in allowed_builtins)
-    builtins['__import__'] = safe_import
 
 if __name__ == '__main__':
     from optparse import OptionParser
