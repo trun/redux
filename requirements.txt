@@ -1,0 +1,2 @@
+greenlet
+-e git://github.com/trun/pysandbox.git#egg=pysandbox
