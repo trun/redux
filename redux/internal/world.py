@@ -83,6 +83,11 @@ class Robot(GameObject):
         return _interface()
 
 if __name__ == '__main__':
+    # instrument player code
+    from redux.internal.instrumenter import instrument
+    instrument('teamA')
+    instrument('teamB')
+
     import time
     world = GameWorld()
     robot1 = Robot(world, 'teamA')

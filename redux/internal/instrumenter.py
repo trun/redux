@@ -80,7 +80,7 @@ def instrument(*args, **kwargs):
 
     import compileall
     for path in args:
-        compileall.compile_file(path, force=True)
+        compileall.compile_dir(path, force=True)
 
 if __name__ == '__main__':
     from optparse import OptionParser

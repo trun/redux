@@ -1,6 +1,6 @@
 from greenlet import greenlet
 import os
-from sandbox.sandbox_class import Sandbox, SandboxConfig, _dictProxy
+from sandbox import Sandbox, SandboxConfig
 from redux.internal.exceptions import RobotDeathException
 import traceback
 
@@ -69,7 +69,7 @@ class Scheduler():
 
     def run_thread(self, id):
         """Run a player thread for the given robot id"""
-        print '[SCHEDULER] running thread ', id
+        print '[SCHEDULER] running thread', id
         self.current_thread = self.threads.get(id)
         assert not self.current_thread is None, 'null thread?'
 
@@ -92,8 +92,7 @@ class Scheduler():
         self.current_thread = None
 
     def end_thread(self):
-        print '  > ending thread...'
-        self.current_thread.bytecode_used = 0
+        self.current_thread.bytecode_used -= min(8000, self.current_thread.bytecode_used)
         self.current_thread.player.pause()
 
     def current_robot(self):
@@ -106,7 +105,6 @@ class Scheduler():
         assert amt >= 0, 'negative bytecode increments not allowed'
         self.current_thread.bytecode_used += amt
         if self.current_thread.bytecode_used > BYTECODE_LIMIT:
-            self.current_thread.bytecode_used -= BYTECODE_LIMIT
             self.end_thread()
 
     def get_bytecode_left(self):
@@ -121,20 +119,33 @@ class Player(greenlet):
         super(Player, self).__init__()
         self.robot_controller = robot_controller
 
-        # TODO: we need to add additional builins to the config
-        #   - increment_clock
-        #   - defer
         config = SandboxConfig(use_subprocess=False)
+        config.enable('traceback')
         config.enable('stdout')
         config.enable('stderr')
         config.enable('time')
-        config.allowModule('time', 'sleep')
 
         # TODO need to allow *all* imports from team package
         config.allowModule(robot_controller.robot.team + '.player', 'RobotPlayer')
 
         # TODO need a better method for override the sys_path
         config.sys_path = config.sys_path + (os.getcwd(),)
+
+        # add additional builtins to the config
+        #   - increment_clock
+        #   - yield_execution
+        this = self
+        def yield_execution():
+            this.parent.pause()
+
+        def increment_clock(amt):
+            Scheduler.instance().increment_bytecode(amt)
+
+        # TODO need a better method to add builtins additions
+        config._builtins_additions = {
+            'yield_execution': yield_execution,
+            'increment_clock': increment_clock,
+        }
 
         self.sandbox = Sandbox(config)
         self.running = False
@@ -153,22 +164,10 @@ class Player(greenlet):
         self.sandbox.enable_protections()
 
     def run(self, *args):
-        this = self
-        def yield_execution():
-            print '  > yielding...'
-            this.parent.pause()
-
-        def increment_clock(amt):
-            Scheduler.instance().increment_bytecode(amt)
-
         statement = LOADER_CODE.format(team=self.robot_controller.robot.team)
-        safeglobals = {
-            'yield_execution': yield_execution,
-            'increment_clock': increment_clock,
-        }
         safelocals = { 'rc': self.robot_controller }
         self.running = True
-        self.sandbox.execute(statement, globals=safeglobals, locals=safelocals)
+        self.sandbox.execute(statement, globals={}, locals=safelocals)
 
 
 class PlayerThread(object):
