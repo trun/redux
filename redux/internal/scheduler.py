@@ -1,105 +1,205 @@
 from greenlet import greenlet
-from sandbox import Sandbox, SandboxConfig
-import __builtin__
-import time
+import os
+from sandbox.sandbox_class import Sandbox, SandboxConfig, _dictProxy
+from redux.internal.exceptions import RobotDeathException
 import traceback
 
-# This is just for testing
-LOADER_CODE = """
+# this is just for testing
+LOADER_CODE_TEST = """
 import time
 while True:
     try:
         print 'running... %s' % str(rc)
         time.sleep(1)
         print 'done'
-        yield_and_reschedule()
+        defer()
     except Exception:
         print 'caught exception... ignoring'
 """
 
 # This will be the real player execution code
-LOADER_CODE_REAL = """
+LOADER_CODE = """
 from {team}.player import RobotPlayer
 player = RobotPlayer(rc)
 player.run()
 """
 
-def passthrough(thread):
+# TODO paramaterize
+BYTECODE_LIMIT = 8000
+
+def passthrough(thread, throw=False):
     """A one shot greenlet that simply resumes an existing greenlet and then
     returns. This allows greenlets to be resumed without a presistent parent.
     """
     def _run():
-        retval = thread.resume()
+        retval = thread.resume(throw)
         if retval is None:
-            raise Exception('robot run method returned') # TODO: RobotDeathException
+            raise Exception('robot run method returned')
         return retval
     g = greenlet(run=_run)
     thread.parent = g
     return g.switch()
 
 class Scheduler():
-    def __init__(self):
-        self.threads = []
+    _instance = None
 
-    def add(self, thread):
-        self.threads.append(thread)
+    def __init__(self, game_world):
+        self.game_world = game_world
+        self.current_thread = None
+        self.threads = {}
+        self.threads_to_kill = set()
 
-    def run_next(self):
-        thread = self.threads.pop(0)
+    @classmethod
+    def create(cls, game_world=None):
+        cls._instance = Scheduler(game_world)
+
+    @classmethod
+    def destroy(cls):
+        cls._instance = None
+
+    @classmethod
+    def instance(cls):
+        return cls._instance
+
+    def spawn_thread(self, robot):
+        """Spawn a new player"""
+        player = Player(RobotController(robot, self.game_world).interface())
+        thread = PlayerThread(player)
+        self.threads[robot.id] = thread
+
+    def run_thread(self, id):
+        """Run a player thread for the given robot id"""
+        print '[SCHEDULER] running thread ', id
+        self.current_thread = self.threads.get(id)
+        assert not self.current_thread is None, 'null thread?'
+
+        # check if the robot is scheduled to be killed
+        throw = id in self.threads_to_kill
+
+        # check if the robot is over the bytecode limit
+        if self.get_bytecode_left() < 0 and not throw:
+            self.current_thread.bytecode_used -= BYTECODE_LIMIT
+            return
+
+        # resume robot execution
         try:
-            passthrough(thread)
-        except Exception:
-            traceback.print_exc()
-            pass # TODO: thread is dead -- cleanup
-        else:
-            self.threads.append(thread)
+            passthrough(self.current_thread.player, throw)
+        except Exception as e:
+            if not isinstance(e, RobotDeathException):
+                traceback.print_exc()
+            del self.threads[id]
 
-    def run(self):
-        while self.threads:
-            self.run_next()
+        self.current_thread = None
+
+    def end_thread(self):
+        print '  > ending thread...'
+        self.current_thread.bytecode_used = 0
+        self.current_thread.player.pause()
+
+    def current_robot(self):
+        return self.current_thread.player.robot_controller.robot
+
+    def kill_robot(self, id):
+        self.threads_to_kill.add(id)
+
+    def increment_bytecode(self, amt):
+        assert amt >= 0, 'negative bytecode increments not allowed'
+        self.current_thread.bytecode_used += amt
+        if self.current_thread.bytecode_used > BYTECODE_LIMIT:
+            self.current_thread.bytecode_used -= BYTECODE_LIMIT
+            self.end_thread()
+
+    def get_bytecode_left(self):
+        return BYTECODE_LIMIT - self.current_thread.bytecode_used
+
+    def get_bytecode_used(self):
+        return self.current_thread.bytecode_used
+
 
 class Player(greenlet):
-    def __init__(self, rc, team):
+    def __init__(self, robot_controller):
         super(Player, self).__init__()
-        self.rc = rc
-        self.team = team
+        self.robot_controller = robot_controller
 
         # TODO: we need to add additional builins to the config
         #   - increment_clock
-        #   - yield_and_reschedule
+        #   - defer
         config = SandboxConfig(use_subprocess=False)
         config.enable('stdout')
         config.enable('stderr')
         config.enable('time')
         config.allowModule('time', 'sleep')
+
+        # TODO need to allow *all* imports from team package
+        config.allowModule(robot_controller.robot.team + '.player', 'RobotPlayer')
+
+        # TODO need a better method for override the sys_path
+        config.sys_path = config.sys_path + (os.getcwd(),)
+
         self.sandbox = Sandbox(config)
         self.running = False
 
-    def resume(self):
-        if self.running:
-            self.sandbox.enable_protections()
-        return self.switch()
+    def resume(self, throw=False):
+        return self.switch(throw)
 
-    def run(self):
+    def pause(self):
+        # break out of the sandbox
+        self.sandbox.disable_protections()
+        # return execution to the scheduler
+        throw = self.parent.switch()
+        if throw:
+            raise RobotDeathException('killed by engine')
+        # re-enable sandbox protections
+        self.sandbox.enable_protections()
+
+    def run(self, *args):
         this = self
-        def yield_and_reschedule():
-            # break out of the sandbox
-            this.sandbox.disable_protections()
-            # return execution to the scheduler
-            this.parent.switch()
+        def yield_execution():
+            print '  > yielding...'
+            this.parent.pause()
 
-        statement = LOADER_CODE.format(team=self.team)
+        def increment_clock(amt):
+            Scheduler.instance().increment_bytecode(amt)
+
+        statement = LOADER_CODE.format(team=self.robot_controller.robot.team)
         safeglobals = {
-            'yield_and_reschedule': yield_and_reschedule,
+            'yield_execution': yield_execution,
+            'increment_clock': increment_clock,
         }
-        safelocals = { 'rc': self.rc }
+        safelocals = { 'rc': self.robot_controller }
         self.running = True
         self.sandbox.execute(statement, globals=safeglobals, locals=safelocals)
 
-if __name__ == '__main__':
-    s = Scheduler()
-    p1 = Player('rc1', 'teamA')
-    p2 = Player('rc2', 'teamB')
-    s.add(p1)
-    s.add(p2)
-    s.run()
+
+class PlayerThread(object):
+    def __init__(self, player):
+        self.bytecode_used = 0
+        self.player = player
+
+
+class RobotController(object):
+    def __init__(self, robot, game_world):
+        self.robot = robot
+        self.game_world = game_world
+
+    def yield_execution(self):
+        # TODO yield bonus
+        Scheduler.instance().end_thread()
+
+    def interface(self):
+        """
+        Returns an encapsulated version of the controller that can safely be
+        passed to the sandboxed player code.
+        """
+        this = self
+        class _interface(object):
+            def __init__(self):
+                self._robot = this.robot.interface() # TODO robot should cache its own interface
+
+            def yield_execution(self):
+                this.yield_execution()
+
+            @property
+            def robot(self):
+                return self._robot
+        return _interface()

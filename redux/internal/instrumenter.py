@@ -6,6 +6,13 @@ class InstrumentTransformer(NodeTransformer):
         self.expr_count = 0
         super(InstrumentTransformer, self).__init__()
 
+    def visit_TryExcept(self, node):
+        """Adds an uncatchable handler for RobotDeathExceptions"""
+        handler = self.robot_death_handler()
+        handlers = [ handler ] + node.handlers
+        node.handlers[:] = handlers
+        return self.generic_visit(node)
+
     def generic_visit(self, node):
         self.expr_count += 1
         for field, old_value in iter_fields(node):
@@ -34,14 +41,25 @@ class InstrumentTransformer(NodeTransformer):
         return node
 
     def incr_stmt(self, incr=1):
-        node = parse('__builtins__["clockIncrement"](' + str(incr) + ')').body
+        # TODO reference builtins to prevent local override
+        node = parse('increment_clock(' + str(incr) + ')').body
         return node
+
+    def robot_death_handler(self):
+        node = parse('try:\n  pass\nexcept RobotDeathException:\n  raise')
+        return node.body[0].handlers[0]
 
     @staticmethod
     def isbody(node, field):
         if isinstance(node, FunctionDef):
             return field == 'body'
         if isinstance(node, For):
+            return field == 'body' or field == 'orelse'
+        if isinstance(node, While):
+            return field == 'body' or field == 'orelse'
+        if isinstance(node, If):
+            return field == 'body' or field == 'orelse'
+        if isinstance(node, TryExcept):
             return field == 'body' or field == 'orelse'
         return False
 
