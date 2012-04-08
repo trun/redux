@@ -133,17 +133,12 @@ class Player(greenlet):
 
         # add additional builtins to the config
         #   - increment_clock
-        #   - yield_execution
         this = self
-        def yield_execution():
-            this.parent.pause()
-
         def increment_clock(amt):
             Scheduler.instance().increment_bytecode(amt)
 
         # TODO need a better method to add builtins additions
         config._builtins_additions = {
-            'yield_execution': yield_execution,
             'increment_clock': increment_clock,
         }
 
